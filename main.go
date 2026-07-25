@@ -42,13 +42,16 @@ func main() {
 	myWindow := myApp.NewWindow("🎥 极简视频剪辑器")
 	myWindow.Resize(fyne.NewSize(800, 600))
 
-	// UI 组件定义
+	// 1. 视频文件选择组件
 	fileEntry := widget.NewEntry()
 	fileEntry.SetPlaceHolder("请选择或输入视频文件路径...")
 
-	// 浏览文件按钮
-// 浏览文件按钮
-	browseBtn := widget.NewButton("📁 浏览...", func() {
+	// 2. 输出文件夹选择组件
+	outputDirEntry := widget.NewEntry()
+	outputDirEntry.SetPlaceHolder("默认保存至原视频所在目录...")
+
+	// 浏览视频文件按钮
+	browseFileBtn := widget.NewButton("📁 浏览...", func() {
 		fd := dialog.NewFileOpen(func(reader fyne.URIReadCloser, err error) {
 			if err != nil || reader == nil {
 				return
@@ -59,13 +62,35 @@ func main() {
 			// 使用 fyne.Do 切换回主 UI 线程来修改文本框
 			fyne.Do(func() {
 				fileEntry.SetText(path)
+				// 自动将输出目录设置为原视频所在目录（如果当前还没手动设置过）
+				if strings.TrimSpace(outputDirEntry.Text) == "" {
+					outputDirEntry.SetText(filepath.Dir(path))
+				}
 			})
 		}, myWindow)
 
 		// 限制只能选择视频文件
 		fd.SetFilter(storage.NewExtensionFileFilter([]string{".mp4", ".mov", ".mkv", ".avi"}))
 		fd.Show()
+		fd.Resize(fyne.NewSize(600, 400))
 	})
+
+// 选择输出文件夹按钮
+    browseDirBtn := widget.NewButton("📁 选择...", func() {
+        folderDlg := dialog.NewFolderOpen(func(uri fyne.ListableURI, err error) {
+            if err != nil || uri == nil {
+                return
+            }
+            dirPath := uri.Path()
+            fyne.Do(func() {
+                outputDirEntry.SetText(dirPath)
+            })
+        }, myWindow)
+
+        // ⚠️ 关键：先 Show 创建 UI 元素，再 Resize 调整大小
+        folderDlg.Show()
+        folderDlg.Resize(fyne.NewSize(600, 400))
+    })
 
 	startTimeEntry := widget.NewEntry()
 	startTimeEntry.SetPlaceHolder("例: 00:00:05 或 5")
@@ -112,10 +137,24 @@ func main() {
 			return
 		}
 
+		// 确定保存的目录：如果用户没填，则默认保存在原视频所在目录
+		outputDir := strings.TrimSpace(outputDirEntry.Text)
+		if outputDir == "" {
+			outputDir = filepath.Dir(inputFile)
+		}
+
+		// 校验输出目录是否存在
+		if info, err := os.Stat(outputDir); err != nil || !info.IsDir() {
+			dialog.ShowError(fmt.Errorf("输出目录不存在: %s", outputDir), myWindow)
+			return
+		}
+
+		// 拼装输出文件路径
 		suffix := strings.TrimSpace(suffixEntry.Text)
 		ext := filepath.Ext(inputFile)
-		baseName := strings.TrimSuffix(inputFile, ext)
-		outputFile := fmt.Sprintf("%s%s%s", baseName, suffix, ext)
+		fileNameOnly := strings.TrimSuffix(filepath.Base(inputFile), ext)
+		outFileName := fmt.Sprintf("%s%s%s", fileNameOnly, suffix, ext)
+		outputFile := filepath.Join(outputDir, outFileName)
 
 		// 禁用按钮，显示进度条
 		startBtn.Disable()
@@ -128,8 +167,8 @@ func main() {
 				"-ss", startTime,
 				"-to", endTime,
 				"-i", inputFile,
-				"-c:v", "copy", // 👈 视频流极速复制（保证无损且秒出）
-				"-c:a", "aac",  // 👈 音频流转为 AAC（保证任何 MP4 格式都不报错）
+				"-c:v", "copy", // 视频流极速复制（保证无损且秒出）
+				"-c:a", "aac",  // 音频流转为 AAC（保证任何 MP4 格式都不报错）
 				outputFile,
 			}
 
@@ -154,7 +193,8 @@ func main() {
 
 	// 布局表单
 	form := widget.NewForm(
-		widget.NewFormItem("视频文件", container.NewBorder(nil, nil, nil, browseBtn, fileEntry)),
+		widget.NewFormItem("视频文件", container.NewBorder(nil, nil, nil, browseFileBtn, fileEntry)),
+		widget.NewFormItem("输出目录", container.NewBorder(nil, nil, nil, browseDirBtn, outputDirEntry)),
 		widget.NewFormItem("开始时间", startTimeEntry),
 		widget.NewFormItem("结束时间", endTimeEntry),
 		widget.NewFormItem("输出后缀", suffixEntry),
