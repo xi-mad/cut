@@ -69,9 +69,11 @@ func main() {
 
 	startTimeEntry := widget.NewEntry()
 	startTimeEntry.SetPlaceHolder("例: 00:00:05 或 5")
+	startTimeEntry.SetText("00:00:00")
 
 	endTimeEntry := widget.NewEntry()
 	endTimeEntry.SetPlaceHolder("例: 00:01:20 或 80")
+	endTimeEntry.SetText("00:00:15")
 
 	suffixEntry := widget.NewEntry()
 	suffixEntry.SetText("_cut")
