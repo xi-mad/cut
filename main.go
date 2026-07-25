@@ -128,7 +128,8 @@ func main() {
 				"-ss", startTime,
 				"-to", endTime,
 				"-i", inputFile,
-				"-c", "copy",
+				"-c:v", "copy", // 👈 视频流极速复制（保证无损且秒出）
+				"-c:a", "aac",  // 👈 音频流转为 AAC（保证任何 MP4 格式都不报错）
 				outputFile,
 			}
 
