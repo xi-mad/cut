@@ -5,69 +5,67 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/widget"
 )
+
+// getFFmpegPath 优先查找当前目录下的 ffmpeg，若无则查找系统 PATH
+func getFFmpegPath() (string, error) {
+	localFFmpeg := "./ffmpeg"
+	if runtime.GOOS == "windows" {
+		localFFmpeg = "./ffmpeg.exe"
+	}
+
+	// 1. 检查当前目录下是否有 ffmpeg
+	if _, err := os.Stat(localFFmpeg); err == nil {
+		return localFFmpeg, nil
+	}
+
+	// 2. 尝试从系统环境变量中查找
+	path, err := exec.LookPath("ffmpeg")
+	if err == nil {
+		return path, nil
+	}
+
+	return "", fmt.Errorf("未找到 ffmpeg，请确保它在当前目录或系统 PATH 中")
+}
 
 func main() {
 	myApp := app.NewWithID("com.videocut.app")
 	myWindow := myApp.NewWindow("🎥 极简视频剪辑器")
-	myWindow.Resize(fyne.NewSize(550, 420))
-
-	// 变量状态
-	var currentDir string = "."
-	var videoFiles []string
+	myWindow.Resize(fyne.NewSize(800, 600))
 
 	// UI 组件定义
-	dirEntry := widget.NewEntry()
-	dirEntry.SetText(".")
-	dirEntry.SetPlaceHolder("请选择或输入视频所在目录")
+	fileEntry := widget.NewEntry()
+	fileEntry.SetPlaceHolder("请选择或输入视频文件路径...")
 
-	videoSelect := widget.NewSelect([]string{}, func(selected string) {})
-	videoSelect.PlaceHolder = "请选择视频文件..."
-
-	refreshVideos := func(dir string) {
-		fyne.Do(func() {
-			currentDir = dir
-			videoFiles = getVideosInDir(dir)
-			if len(videoFiles) == 0 {
-				videoSelect.Options = []string{}
-				videoSelect.ClearSelected()
-				videoSelect.PlaceHolder = "⚠️ 当前目录下未找到视频文件 (.mp4, .mov, .mkv, .avi)"
-			} else {
-				videoSelect.Options = videoFiles
-				videoSelect.SetSelected(videoFiles[0])
-			}
-			videoSelect.Refresh()
-		})
-	}
-
-	// 浏览文件夹按钮
+	// 浏览文件按钮
+// 浏览文件按钮
 	browseBtn := widget.NewButton("📁 浏览...", func() {
-		dialog.ShowFolderOpen(func(uri fyne.ListableURI, err error) {
-			if err != nil || uri == nil {
+		fd := dialog.NewFileOpen(func(reader fyne.URIReadCloser, err error) {
+			if err != nil || reader == nil {
 				return
 			}
-			path := uri.Path()
-			dirEntry.SetText(path)
-			refreshVideos(path)
-		}, myWindow)
-	})
+			path := reader.URI().Path()
+			reader.Close() // 关闭文件流放在外层
 
-	dirEntry.OnChanged = func(path string) {
-		dir := strings.TrimSpace(path)
-		if dir == "" {
-			dir = "."
-		}
-		if info, err := os.Stat(dir); err == nil && info.IsDir() {
-			refreshVideos(dir)
-		}
-	}
+			// 使用 fyne.Do 切换回主 UI 线程来修改文本框
+			fyne.Do(func() {
+				fileEntry.SetText(path)
+			})
+		}, myWindow)
+
+		// 限制只能选择视频文件
+		fd.SetFilter(storage.NewExtensionFileFilter([]string{".mp4", ".mov", ".mkv", ".avi"}))
+		fd.Show()
+	})
 
 	startTimeEntry := widget.NewEntry()
 	startTimeEntry.SetPlaceHolder("例: 00:00:05 或 5")
@@ -87,8 +85,8 @@ func main() {
 	var startBtn *widget.Button
 
 	startBtn = widget.NewButton("✂️ 开始剪辑视频", func() {
-		selectedVideo := videoSelect.Selected
-		if selectedVideo == "" || strings.HasPrefix(selectedVideo, "⚠️") {
+		inputFile := strings.TrimSpace(fileEntry.Text)
+		if inputFile == "" {
 			dialog.ShowError(fmt.Errorf("请先选择一个有效的视频文件"), myWindow)
 			return
 		}
@@ -105,8 +103,14 @@ func main() {
 			return
 		}
 
+		// 检查 FFmpeg 环境
+		ffmpegPath, err := getFFmpegPath()
+		if err != nil {
+			dialog.ShowError(err, myWindow)
+			return
+		}
+
 		suffix := strings.TrimSpace(suffixEntry.Text)
-		inputFile := filepath.Join(currentDir, selectedVideo)
 		ext := filepath.Ext(inputFile)
 		baseName := strings.TrimSuffix(inputFile, ext)
 		outputFile := fmt.Sprintf("%s%s%s", baseName, suffix, ext)
@@ -114,7 +118,7 @@ func main() {
 		// 禁用按钮，显示进度条
 		startBtn.Disable()
 		progressBar.Show()
-		statusLabel.SetText("⏱️ 正在剪辑中，请稍候...")
+		statusLabel.SetText(fmt.Sprintf("⏱️ 正在使用 %s 剪辑中...", filepath.Base(ffmpegPath)))
 
 		go func() {
 			args := []string{
@@ -126,7 +130,7 @@ func main() {
 				outputFile,
 			}
 
-			cmd := exec.Command("ffmpeg", args...)
+			cmd := exec.Command(ffmpegPath, args...)
 			output, err := cmd.CombinedOutput()
 
 			// 切回 GUI 主线程更新 UI 状态
@@ -147,8 +151,7 @@ func main() {
 
 	// 布局表单
 	form := widget.NewForm(
-		widget.NewFormItem("视频目录", container.NewBorder(nil, nil, nil, browseBtn, dirEntry)),
-		widget.NewFormItem("选择视频", videoSelect),
+		widget.NewFormItem("视频文件", container.NewBorder(nil, nil, nil, browseBtn, fileEntry)),
 		widget.NewFormItem("开始时间", startTimeEntry),
 		widget.NewFormItem("结束时间", endTimeEntry),
 		widget.NewFormItem("输出后缀", suffixEntry),
@@ -164,26 +167,6 @@ func main() {
 		statusLabel,
 	)
 
-	// 初始化读取默认目录
-	refreshVideos(".")
-
 	myWindow.SetContent(container.NewPadded(content))
 	myWindow.ShowAndRun()
-}
-
-func getVideosInDir(dir string) []string {
-	var files []string
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return files
-	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			ext := strings.ToLower(filepath.Ext(e.Name()))
-			if ext == ".mp4" || ext == ".mov" || ext == ".mkv" || ext == ".avi" {
-				files = append(files, e.Name())
-			}
-		}
-	}
-	return files
 }
