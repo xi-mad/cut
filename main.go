@@ -1,11 +1,10 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"fyne.io/fyne/v2"
@@ -16,200 +15,205 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-// getFFmpegPath 优先查找当前目录下的 ffmpeg，若无则查找系统 PATH
-func getFFmpegPath() (string, error) {
-	localFFmpeg := "./ffmpeg"
-	if runtime.GOOS == "windows" {
-		localFFmpeg = "./ffmpeg.exe"
-	}
-
-	// 1. 检查当前目录下是否有 ffmpeg
-	if _, err := os.Stat(localFFmpeg); err == nil {
-		return localFFmpeg, nil
-	}
-
-	// 2. 尝试从系统环境变量中查找
-	path, err := exec.LookPath("ffmpeg")
-	if err == nil {
-		return path, nil
-	}
-
-	return "", fmt.Errorf("未找到 ffmpeg，请确保它在当前目录或系统 PATH 中")
-}
-
 func main() {
-	myApp := app.NewWithID("com.videocut.app")
-	myWindow := myApp.NewWindow("🎥 极简视频剪辑器")
-	myWindow.Resize(fyne.NewSize(800, 600))
-
-	// 1. 视频文件选择组件
-	fileEntry := widget.NewEntry()
-	fileEntry.SetPlaceHolder("请选择或输入视频文件路径...")
-
-	// 2. 输出文件夹选择组件
-	outputDirEntry := widget.NewEntry()
-	outputDirEntry.SetPlaceHolder("默认保存至原视频所在目录...")
-
-	// 浏览视频文件按钮
-	browseFileBtn := widget.NewButton("📁 浏览...", func() {
-		fd := dialog.NewFileOpen(func(reader fyne.URIReadCloser, err error) {
-			if err != nil || reader == nil {
+	a := app.NewWithID("com.videocut.app")
+	w := a.NewWindow("视频剪辑小助手 · 删掉不要的，剩下自动合并")
+	w.Resize(fyne.NewSize(880, 760))
+	file := widget.NewEntry()
+	file.SetPlaceHolder("选择原视频，或已经截取过的视频")
+	dir := widget.NewEntry()
+	dir.SetPlaceHolder("默认保存到原视频所在目录")
+	name := widget.NewEntry()
+	name.SetPlaceHolder("默认：原文件名_edited.mp4")
+	start, end := widget.NewEntry(), widget.NewEntry()
+	start.SetText("0")
+	end.SetPlaceHolder("必填，例如 5:36")
+	mode := widget.NewSelect([]string{"删除这些片段，合并剩余内容", "只保留这些片段，按时间合并"}, nil)
+	mode.SetSelectedIndex(0)
+	reference := widget.NewSelect([]string{"原视频时间（与播放器显示一致）", "总范围内时间（总范围起点算 0）"}, nil)
+	reference.SetSelectedIndex(0)
+	ranges := widget.NewMultiLineEntry()
+	ranges.SetMinRowsVisible(5)
+	ranges.SetPlaceHolder("每行一段，例如：\n2:00 - 3:00\n4:12.500 - 4:14\n删除模式留空时，导出整个总范围")
+	preview := widget.NewLabel("")
+	preview.Wrapping = fyne.TextWrapWord
+	makePlan := func() ([]span, error) {
+		s, err := parseTime(start.Text)
+		if err != nil {
+			return nil, err
+		}
+		e, err := parseTime(end.Text)
+		if err != nil {
+			return nil, fmt.Errorf("请填写有效的总范围结束时间")
+		}
+		return plan(s, e, ranges.Text, mode.SelectedIndex() == 1, reference.SelectedIndex() == 1)
+	}
+	refresh := func() {
+		p, err := makePlan()
+		if err != nil {
+			preview.SetText(err.Error())
+			return
+		}
+		var b strings.Builder
+		total := 0.0
+		for i, r := range p {
+			fmt.Fprintf(&b, "%d. %s → %s\n", i+1, stamp(r.Start), stamp(r.End))
+			total += r.End - r.Start
+		}
+		preview.SetText(fmt.Sprintf("将按原视频顺序合并 %d 段，共 %s\n%s", len(p), stamp(total), b.String()))
+	}
+	start.OnChanged = func(string) { refresh() }
+	end.OnChanged = start.OnChanged
+	ranges.OnChanged = start.OnChanged
+	mode.OnChanged = start.OnChanged
+	reference.OnChanged = start.OnChanged
+	browse := widget.NewButton("选择视频", func() {
+		d := dialog.NewFileOpen(func(r fyne.URIReadCloser, err error) {
+			if err != nil {
+				dialog.ShowError(err, w)
 				return
 			}
-			path := reader.URI().Path()
-			reader.Close() // 关闭文件流放在外层
-
-			// 使用 fyne.Do 切换回主 UI 线程来修改文本框
-			fyne.Do(func() {
-				fileEntry.SetText(path)
-				// 自动将输出目录设置为原视频所在目录（如果当前还没手动设置过）
-				if strings.TrimSpace(outputDirEntry.Text) == "" {
-					outputDirEntry.SetText(filepath.Dir(path))
-				}
-			})
-		}, myWindow)
-
-		// 限制只能选择视频文件
-		fd.SetFilter(storage.NewExtensionFileFilter([]string{".mp4", ".mov", ".mkv", ".avi"}))
-		fd.Show()
-		fd.Resize(fyne.NewSize(600, 400))
-	})
-
-// 选择输出文件夹按钮
-    browseDirBtn := widget.NewButton("📁 选择...", func() {
-        folderDlg := dialog.NewFolderOpen(func(uri fyne.ListableURI, err error) {
-            if err != nil || uri == nil {
-                return
-            }
-            dirPath := uri.Path()
-            fyne.Do(func() {
-                outputDirEntry.SetText(dirPath)
-            })
-        }, myWindow)
-
-        // ⚠️ 关键：先 Show 创建 UI 元素，再 Resize 调整大小
-        folderDlg.Show()
-        folderDlg.Resize(fyne.NewSize(600, 400))
-    })
-
-	startTimeEntry := widget.NewEntry()
-	startTimeEntry.SetPlaceHolder("例: 00:00:05 或 5")
-	startTimeEntry.SetText("00:00:00")
-
-	endTimeEntry := widget.NewEntry()
-	endTimeEntry.SetPlaceHolder("例: 00:01:20 或 80")
-	endTimeEntry.SetText("00:00:15")
-
-	suffixEntry := widget.NewEntry()
-	suffixEntry.SetText("_cut")
-
-	progressBar := widget.NewProgressBarInfinite()
-	progressBar.Hide()
-
-	statusLabel := widget.NewLabel("就绪")
-	statusLabel.Alignment = fyne.TextAlignCenter
-
-	var startBtn *widget.Button
-
-	startBtn = widget.NewButton("✂️ 开始剪辑视频", func() {
-		inputFile := strings.TrimSpace(fileEntry.Text)
-		if inputFile == "" {
-			dialog.ShowError(fmt.Errorf("请先选择一个有效的视频文件"), myWindow)
-			return
-		}
-
-		startTime := strings.TrimSpace(startTimeEntry.Text)
-		if startTime == "" {
-			dialog.ShowError(fmt.Errorf("请输入开始时间"), myWindow)
-			return
-		}
-
-		endTime := strings.TrimSpace(endTimeEntry.Text)
-		if endTime == "" {
-			dialog.ShowError(fmt.Errorf("请输入结束时间"), myWindow)
-			return
-		}
-
-		// 检查 FFmpeg 环境
-		ffmpegPath, err := getFFmpegPath()
-		if err != nil {
-			dialog.ShowError(err, myWindow)
-			return
-		}
-
-		// 确定保存的目录：如果用户没填，则默认保存在原视频所在目录
-		outputDir := strings.TrimSpace(outputDirEntry.Text)
-		if outputDir == "" {
-			outputDir = filepath.Dir(inputFile)
-		}
-
-		// 校验输出目录是否存在
-		if info, err := os.Stat(outputDir); err != nil || !info.IsDir() {
-			dialog.ShowError(fmt.Errorf("输出目录不存在: %s", outputDir), myWindow)
-			return
-		}
-
-		// 拼装输出文件路径
-		suffix := strings.TrimSpace(suffixEntry.Text)
-		ext := filepath.Ext(inputFile)
-		fileNameOnly := strings.TrimSuffix(filepath.Base(inputFile), ext)
-		outFileName := fmt.Sprintf("%s%s%s", fileNameOnly, suffix, ext)
-		outputFile := filepath.Join(outputDir, outFileName)
-
-		// 禁用按钮，显示进度条
-		startBtn.Disable()
-		progressBar.Show()
-		statusLabel.SetText(fmt.Sprintf("⏱️ 正在使用 %s 剪辑中...", filepath.Base(ffmpegPath)))
-
-		go func() {
-			args := []string{
-				"-y",
-				"-ss", startTime,
-				"-to", endTime,
-				"-i", inputFile,
-				"-c:v", "copy", // 视频流极速复制（保证无损且秒出）
-				"-c:a", "aac",  // 音频流转为 AAC（保证任何 MP4 格式都不报错）
-				outputFile,
+			if r == nil {
+				return
 			}
-
-			cmd := exec.Command(ffmpegPath, args...)
-			output, err := cmd.CombinedOutput()
-
-			// 切回 GUI 主线程更新 UI 状态
-			fyne.Do(func() {
-				startBtn.Enable()
-				progressBar.Hide()
-				if err != nil {
-					statusLabel.SetText("❌ 剪辑失败")
-					dialog.ShowError(fmt.Errorf("FFmpeg 报错:\n%s", string(output)), myWindow)
-				} else {
-					statusLabel.SetText("✨ 剪辑成功！")
-					dialog.ShowInformation("成功", fmt.Sprintf("文件已保存至:\n%s", outputFile), myWindow)
+			file.SetText(r.URI().Path())
+			r.Close()
+		}, w)
+		d.SetFilter(storage.NewExtensionFileFilter([]string{".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".ts"}))
+		d.Show()
+		d.Resize(fyne.NewSize(700, 480))
+	})
+	folder := widget.NewButton("选择目录", func() {
+		dialog.NewFolderOpen(func(u fyne.ListableURI, err error) {
+			if err != nil {
+				dialog.ShowError(err, w)
+				return
+			}
+			if u != nil {
+				dir.SetText(u.Path())
+			}
+		}, w).Show()
+	})
+	status := widget.NewLabel("就绪 · 支持 秒、分:秒、时:分:秒，以及毫秒")
+	status.Wrapping = fyne.TextWrapWord
+	bar := widget.NewProgressBarInfinite()
+	bar.Hide()
+	var cancel context.CancelFunc
+	cancelBtn := widget.NewButton("取消导出", func() {
+		if cancel != nil {
+			cancel()
+			status.SetText("正在取消…")
+		}
+	})
+	cancelBtn.Disable()
+	var export *widget.Button
+	export = widget.NewButton("合并导出 MP4", func() {
+		p, err := makePlan()
+		if err != nil {
+			dialog.ShowError(err, w)
+			return
+		}
+		input, err := filepath.Abs(strings.TrimSpace(file.Text))
+		if err != nil || strings.TrimSpace(file.Text) == "" {
+			dialog.ShowError(fmt.Errorf("请先选择视频"), w)
+			return
+		}
+		if info, err := os.Stat(input); err != nil || !info.Mode().IsRegular() {
+			dialog.ShowError(fmt.Errorf("视频文件不存在或不是普通文件"), w)
+			return
+		}
+		ffmpeg, err := findTool("ffmpeg")
+		if err != nil {
+			dialog.ShowError(err, w)
+			return
+		}
+		ffprobe, err := findTool("ffprobe")
+		if err != nil {
+			dialog.ShowError(err, w)
+			return
+		}
+		outputDir := strings.TrimSpace(dir.Text)
+		if outputDir == "" {
+			outputDir = filepath.Dir(input)
+		}
+		if info, err := os.Stat(outputDir); err != nil || !info.IsDir() {
+			dialog.ShowError(fmt.Errorf("输出目录不存在"), w)
+			return
+		}
+		outputName := strings.TrimSpace(name.Text)
+		if outputName == "" {
+			outputName = strings.TrimSuffix(filepath.Base(input), filepath.Ext(input)) + "_edited.mp4"
+		}
+		if strings.ContainsAny(outputName, "/\\:") || outputName == "." || outputName == ".." {
+			dialog.ShowError(fmt.Errorf("输出文件名不能包含路径或冒号"), w)
+			return
+		}
+		if !strings.HasSuffix(strings.ToLower(outputName), ".mp4") {
+			outputName += ".mp4"
+		}
+		output, err := filepath.Abs(filepath.Join(outputDir, outputName))
+		if err != nil {
+			dialog.ShowError(err, w)
+			return
+		}
+		if _, err := os.Lstat(output); !os.IsNotExist(err) {
+			dialog.ShowError(fmt.Errorf("输出文件已存在或无法访问，请换一个文件名"), w)
+			return
+		}
+		rangeEnd, _ := parseTime(end.Text)
+		ctx, stop := context.WithCancel(context.Background())
+		cancel = stop
+		export.Disable()
+		cancelBtn.Enable()
+		bar.Show()
+		status.SetText("正在检查视频…")
+		go func() {
+			defer stop()
+			info, err := probe(ctx, ffprobe, input)
+			if err == nil {
+				if rangeEnd > info.Duration+0.001 {
+					err = fmt.Errorf("片段超出视频时长 %s", stamp(info.Duration))
 				}
+			}
+			if err == nil {
+				err = render(ctx, ffmpeg, input, output, p, info.Audio, func(i, n int) {
+					fyne.Do(func() { status.SetText(fmt.Sprintf("正在精确剪辑第 %d / %d 段，请稍候…", i, n)) })
+				})
+			}
+			cancelled := ctx.Err() != nil
+			fyne.Do(func() {
+				cancel = nil
+				export.Enable()
+				cancelBtn.Disable()
+				bar.Hide()
+				if cancelled {
+					status.SetText("已取消导出")
+					return
+				}
+				if err != nil {
+					status.SetText("导出失败，请检查输入")
+					dialog.ShowError(err, w)
+					return
+				}
+				status.SetText("已合并导出：" + output)
+				dialog.ShowInformation("导出完成", "剩余片段已合并到：\n"+output, w)
 			})
 		}()
 	})
-	startBtn.Importance = widget.HighImportance
-
-	// 布局表单
-	form := widget.NewForm(
-		widget.NewFormItem("视频文件", container.NewBorder(nil, nil, nil, browseFileBtn, fileEntry)),
-		widget.NewFormItem("输出目录", container.NewBorder(nil, nil, nil, browseDirBtn, outputDirEntry)),
-		widget.NewFormItem("开始时间", startTimeEntry),
-		widget.NewFormItem("结束时间", endTimeEntry),
-		widget.NewFormItem("输出后缀", suffixEntry),
-	)
-
-	content := container.NewVBox(
-		widget.NewLabelWithStyle("🎥 视频剪辑小助手", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
-		widget.NewSeparator(),
-		form,
-		widget.NewSeparator(),
-		startBtn,
-		progressBar,
-		statusLabel,
-	)
-
-	myWindow.SetContent(container.NewPadded(content))
-	myWindow.ShowAndRun()
+	export.Importance = widget.HighImportance
+	w.SetCloseIntercept(func() {
+		if cancel != nil {
+			cancel()
+		}
+		w.SetCloseIntercept(nil)
+		w.Close()
+	})
+	form := widget.NewForm(widget.NewFormItem("视频文件", container.NewBorder(nil, nil, nil, browse, file)), widget.NewFormItem("保存目录", container.NewBorder(nil, nil, nil, folder, dir)), widget.NewFormItem("输出文件名", name), widget.NewFormItem("总范围开始", start), widget.NewFormItem("总范围结束", end), widget.NewFormItem("剪辑方式", mode), widget.NewFormItem("时间基准", reference))
+	help := widget.NewLabel("例：总范围 1:36 → 5:36，删除 2:00 - 3:00，自动得到 1:36 → 2:00 和 3:00 → 5:36。\n如果打开的是已截取的小视频，直接使用小视频播放器上的时间。重叠片段会自动合并。")
+	help.Wrapping = fyne.TextWrapWord
+	body := container.NewVBox(widget.NewLabelWithStyle("删掉不要的，剩下连起来", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), help, form, widget.NewLabelWithStyle("片段清单 · 每行填写一个时间段", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), ranges, widget.NewSeparator(), widget.NewLabelWithStyle("合并预览（显示原视频时间）", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), preview)
+	footer := container.NewVBox(widget.NewLabel("精确剪辑会重新编码，切点精度受视频帧率限制；原视频不会被覆盖。"), container.NewGridWithColumns(2, export, cancelBtn), bar, status)
+	w.SetContent(container.NewPadded(container.NewBorder(nil, footer, nil, nil, container.NewVScroll(body))))
+	refresh()
+	w.ShowAndRun()
 }

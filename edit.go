@@ -1,0 +1,243 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"math"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+)
+
+type span struct{ Start, End float64 }
+
+func parseTime(s string) (float64, error) {
+	parts := strings.Split(strings.TrimSpace(s), ":")
+	if len(parts) > 3 || len(parts) == 0 {
+		return 0, fmt.Errorf("时间格式应为 秒、分:秒 或 时:分:秒")
+	}
+	total := 0.0
+	for i, p := range parts {
+		if p == "" || (i < len(parts)-1 && strings.Contains(p, ".")) {
+			return 0, fmt.Errorf("时间不能为空")
+		}
+		for _, c := range p {
+			if (c < '0' || c > '9') && !(c == '.' && i == len(parts)-1) {
+				return 0, fmt.Errorf("无效时间：%s", s)
+			}
+		}
+		n, err := strconv.ParseFloat(p, 64)
+		if err != nil || math.IsNaN(n) || math.IsInf(n, 0) || n < 0 || (i > 0 && n >= 60) {
+			return 0, fmt.Errorf("无效时间：%s", s)
+		}
+		total = total*60 + n
+	}
+	return total, nil
+}
+func stamp(t float64) string {
+	ms := int64(math.Round(t * 1000))
+	return fmt.Sprintf("%02d:%02d:%02d.%03d", ms/3600000, ms/60000%60, ms/1000%60, ms%1000)
+}
+func seconds(t float64) string { return strconv.FormatFloat(t, 'f', 6, 64) }
+
+func plan(start, end float64, lines string, keep, relative bool) ([]span, error) {
+	if start < 0 || end <= start {
+		return nil, fmt.Errorf("结束时间必须晚于开始时间")
+	}
+	var ranges []span
+	for i, line := range strings.Split(lines, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		line = strings.NewReplacer("—", "-", "–", "-", "～", "-", "~", "-").Replace(line)
+		pair := strings.Split(line, "-")
+		if len(pair) != 2 {
+			return nil, fmt.Errorf("第 %d 行请填写：开始时间 - 结束时间", i+1)
+		}
+		a, err := parseTime(pair[0])
+		if err != nil {
+			return nil, fmt.Errorf("第 %d 行：%w", i+1, err)
+		}
+		b, err := parseTime(pair[1])
+		if err != nil {
+			return nil, fmt.Errorf("第 %d 行：%w", i+1, err)
+		}
+		if relative {
+			a += start
+			b += start
+		}
+		if a < start || b > end || b <= a {
+			return nil, fmt.Errorf("第 %d 行超出总范围，或结束时间不晚于开始时间", i+1)
+		}
+		ranges = append(ranges, span{a, b})
+	}
+	sort.Slice(ranges, func(i, j int) bool { return ranges[i].Start < ranges[j].Start })
+	var merged []span
+	for _, r := range ranges {
+		if len(merged) > 0 && r.Start <= merged[len(merged)-1].End {
+			merged[len(merged)-1].End = math.Max(merged[len(merged)-1].End, r.End)
+		} else {
+			merged = append(merged, r)
+		}
+	}
+	if keep {
+		if len(merged) == 0 {
+			return nil, fmt.Errorf("请至少填写一个要保留的片段")
+		}
+		return merged, nil
+	}
+	var result []span
+	cursor := start
+	for _, r := range merged {
+		if r.Start > cursor {
+			result = append(result, span{cursor, r.Start})
+		}
+		cursor = r.End
+	}
+	if cursor < end {
+		result = append(result, span{cursor, end})
+	}
+	if len(result) == 0 {
+		return nil, fmt.Errorf("所有内容都被删除了，请保留至少一个片段")
+	}
+	return result, nil
+}
+
+func findTool(name string) (string, error) {
+	if runtimePath, err := os.Executable(); err == nil {
+		candidate := filepath.Join(filepath.Dir(runtimePath), name)
+		if p, err := exec.LookPath(candidate); err == nil {
+			return p, nil
+		}
+		if p, err := exec.LookPath(candidate + ".exe"); err == nil {
+			return p, nil
+		}
+	}
+	if p, err := exec.LookPath("./" + name); err == nil {
+		return p, nil
+	}
+	if p, err := exec.LookPath("./" + name + ".exe"); err == nil {
+		return p, nil
+	}
+	if p, err := exec.LookPath(name); err == nil {
+		return p, nil
+	}
+	return "", fmt.Errorf("未找到 %s，请放在软件同目录或加入系统 PATH", name)
+}
+
+type mediaInfo struct {
+	Duration float64
+	Audio    bool
+}
+
+func probe(ctx context.Context, tool, input string) (mediaInfo, error) {
+	data, err := exec.CommandContext(ctx, tool, "-v", "error", "-show_entries", "format=duration:stream=codec_type", "-of", "json", input).CombinedOutput()
+	if err != nil {
+		return mediaInfo{}, fmt.Errorf("无法读取视频：%s", data)
+	}
+	var info struct {
+		Format struct {
+			Duration string `json:"duration"`
+		} `json:"format"`
+		Streams []struct {
+			Type string `json:"codec_type"`
+		} `json:"streams"`
+	}
+	if err = json.Unmarshal(data, &info); err != nil {
+		return mediaInfo{}, err
+	}
+	duration, err := strconv.ParseFloat(info.Format.Duration, 64)
+	if err != nil || duration <= 0 || math.IsNaN(duration) || math.IsInf(duration, 0) {
+		return mediaInfo{}, fmt.Errorf("无法获取视频时长")
+	}
+	video, audio := false, false
+	for _, s := range info.Streams {
+		video = video || s.Type == "video"
+		audio = audio || s.Type == "audio"
+	}
+	if !video {
+		return mediaInfo{}, fmt.Errorf("文件中没有视频轨道")
+	}
+	return mediaInfo{duration, audio}, nil
+}
+
+// Encode each retained interval with identical settings, then concatenate in source order.
+// Accurate input seeking decodes from the preceding keyframe and discards frames
+// before the requested time, without decoding the whole source for every interval.
+func render(ctx context.Context, ffmpeg, input, output string, ranges []span, audio bool, progress func(int, int)) error {
+	temp, err := os.MkdirTemp(filepath.Dir(output), ".video-cut-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(temp)
+	run := func(args ...string) error {
+		data, err := exec.CommandContext(ctx, ffmpeg, args...).CombinedOutput()
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if len(data) > 6000 {
+				data = data[len(data)-6000:]
+			}
+			return fmt.Errorf("FFmpeg 执行失败：%w\n%s", err, data)
+		}
+		return nil
+	}
+	var manifest strings.Builder
+	for i, r := range ranges {
+		progress(i+1, len(ranges))
+		name := fmt.Sprintf("part-%04d.mp4", i)
+		args := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-ss", seconds(r.Start), "-accurate_seek", "-i", input, "-t", seconds(r.End - r.Start), "-map", "0:v:0"}
+		if audio {
+			args = append(args, "-map", "0:a:0", "-af", "apad", "-c:a", "aac")
+		} else {
+			args = append(args, "-an")
+		}
+		args = append(args, "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", "-t", seconds(r.End-r.Start), filepath.Join(temp, name))
+		if err := run(args...); err != nil {
+			return err
+		}
+		fmt.Fprintf(&manifest, "file '%s'\n", name)
+	}
+	list := filepath.Join(temp, "segments.txt")
+	if err := os.WriteFile(list, []byte(manifest.String()), 0600); err != nil {
+		return err
+	}
+	staged := filepath.Join(temp, "result.mp4")
+	if err := run("-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-f", "concat", "-safe", "1", "-i", list, "-c", "copy", "-movflags", "+faststart", staged); err != nil {
+		return err
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	// Exclusive creation avoids overwriting an existing video, even if it appeared during export.
+	data, err := os.Open(staged)
+	if err != nil {
+		return err
+	}
+	defer data.Close()
+	return publish(data, output)
+}
+
+func publish(src *os.File, path string) error {
+	dst, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	if err != nil {
+		return fmt.Errorf("无法保存（请确认文件名未被占用）：%w", err)
+	}
+	_, err = io.Copy(dst, src)
+	closeErr := dst.Close()
+	if err != nil || closeErr != nil {
+		os.Remove(path)
+		if err != nil {
+			return err
+		}
+		return closeErr
+	}
+	return nil
+}
