@@ -46,11 +46,11 @@ func stamp(t float64) string {
 func seconds(t float64) string { return strconv.FormatFloat(t, 'f', 6, 64) }
 
 // splitAt returns every interval, including the leading and trailing intervals.
-func splitAt(start, end float64, text string, relative bool) ([]span, error) {
-	if start < 0 || end <= start {
-		return nil, fmt.Errorf("结束时间必须晚于开始时间")
+func splitAt(end float64, text string) ([]span, error) {
+	if end <= 0 {
+		return nil, fmt.Errorf("无法获取有效的视频时长")
 	}
-	points := []float64{start, end}
+	points := []float64{0, end}
 	for _, token := range strings.FieldsFunc(text, func(r rune) bool {
 		return r == ',' || r == '，' || r == ';' || r == '；' || r == '\n' || r == '\r' || r == ' ' || r == '\t'
 	}) {
@@ -58,11 +58,8 @@ func splitAt(start, end float64, text string, relative bool) ([]span, error) {
 		if err != nil {
 			return nil, fmt.Errorf("切分点 %q：%w", token, err)
 		}
-		if relative {
-			v += start
-		}
-		if v < start || v > end {
-			return nil, fmt.Errorf("切分点 %s 超出总范围", token)
+		if v < 0 || v > end {
+			return nil, fmt.Errorf("切分点 %s 超出视频时长", token)
 		}
 		points = append(points, v)
 	}

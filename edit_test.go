@@ -13,20 +13,19 @@ import (
 func TestSplitAt(t *testing.T) {
 	tests := []struct {
 		name, text string
-		relative   bool
 		want       []span
 		bad        bool
 	}{
-		{"用户示例", "2:00, 3:00", false, []span{{96, 120}, {120, 180}, {180, 336}}, false},
-		{"排序去重含边界", "3:00，2:00\n2:00;1:36;5:36", false, []span{{96, 120}, {120, 180}, {180, 336}}, false},
-		{"毫秒相对时间", "0:24.500 0:25.500", true, []span{{96, 120.5}, {120.5, 121.5}, {121.5, 336}}, false},
-		{"无切分点", "", false, []span{{96, 336}}, false},
-		{"越界", "1:00", false, nil, true},
-		{"格式错误", "2:00 - 3:00", false, nil, true},
+		{"用户示例", "2:00, 3:00", []span{{0, 120}, {120, 180}, {180, 336}}, false},
+		{"排序去重含边界", "3:00，2:00\n2:00;0;5:36", []span{{0, 120}, {120, 180}, {180, 336}}, false},
+		{"毫秒时间", "0:24.500 0:25.500", []span{{0, 24.5}, {24.5, 25.5}, {25.5, 336}}, false},
+		{"无切分点", "", []span{{0, 336}}, false},
+		{"越界", "6:00", nil, true},
+		{"格式错误", "2:00 - 3:00", nil, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := splitAt(96, 336, tt.text, tt.relative)
+			got, err := splitAt(336, tt.text)
 			if (err != nil) != tt.bad {
 				t.Fatalf("error: %v", err)
 			}
@@ -35,15 +34,15 @@ func TestSplitAt(t *testing.T) {
 			}
 		})
 	}
-	if _, err := splitAt(96, 96, "", false); err == nil {
+	if _, err := splitAt(0, ""); err == nil {
 		t.Fatal("accepted empty overall range")
 	}
 }
 func TestSelectedPlan(t *testing.T) {
-	parts, _ := splitAt(96, 336, "2:00,3:00,4:00", false)
+	parts, _ := splitAt(336, "2:00,3:00,4:00")
 	chosen := map[span]bool{parts[0]: true, parts[2]: true, parts[3]: true}
 	got, err := selectedPlan(parts, chosen)
-	want := []span{{96, 120}, {180, 336}}
+	want := []span{{0, 120}, {180, 336}}
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v %v", got, err)
 	}

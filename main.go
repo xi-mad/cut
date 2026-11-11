@@ -25,11 +25,12 @@ func main() {
 	dir.SetPlaceHolder("默认保存到原视频所在目录")
 	name := widget.NewEntry()
 	name.SetPlaceHolder("默认：原文件名_edited.mp4")
-	start, end := widget.NewEntry(), widget.NewEntry()
-	start.SetText("0")
-	end.SetPlaceHolder("必填，例如 5:36")
-	reference := widget.NewSelect([]string{"原视频时间（与播放器显示一致）", "总范围内时间（总范围起点算 0）"}, nil)
-	reference.SetSelectedIndex(0)
+	videoInfo := widget.NewLabel("选择视频后自动读取时长，切分点使用播放器显示的时间。")
+	videoInfo.Wrapping = fyne.TextWrapWord
+	var duration float64
+	var loadCancel context.CancelFunc
+	var loadID int
+	loadErr := fmt.Errorf("请先选择视频")
 	points := widget.NewMultiLineEntry()
 	points.SetMinRowsVisible(3)
 	points.SetPlaceHolder("输入切分点，每行一个，也可用逗号分隔。例如：2:00, 3:00, 4:12.500, 4:14")
@@ -67,15 +68,9 @@ func main() {
 	}
 	refresh := func() {
 		var next []span
-		s, err := parseTime(start.Text)
+		err := loadErr
 		if err == nil {
-			var e float64
-			e, err = parseTime(end.Text)
-			if err != nil {
-				err = fmt.Errorf("请填写有效的总范围结束时间")
-			} else {
-				next, err = splitAt(s, e, points.Text, reference.SelectedIndex() == 1)
-			}
+			next, err = splitAt(duration, points.Text)
 		}
 		splitErr = err
 		segmentList.RemoveAll()
@@ -103,11 +98,54 @@ func main() {
 		}
 		updatePreview()
 	}
-	start.OnChanged = func(string) { refresh() }
-	end.OnChanged = start.OnChanged
-	points.OnChanged = start.OnChanged
-	reference.OnChanged = start.OnChanged
-	file.OnChanged = func(string) { selected = make(map[span]bool); refresh() }
+	points.OnChanged = func(string) { refresh() }
+	file.OnChanged = func(path string) {
+		if loadCancel != nil {
+			loadCancel()
+			loadCancel = nil
+		}
+		loadID++
+		id := loadID
+		selected = make(map[span]bool)
+		duration = 0
+		loadErr = fmt.Errorf("请先选择有效的视频文件")
+		path = strings.TrimSpace(path)
+		if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
+			videoInfo.SetText("请选择有效的视频文件，软件会自动读取完整时长。")
+			refresh()
+			return
+		}
+		tool, err := findTool("ffprobe")
+		if err != nil {
+			loadErr = err
+			videoInfo.SetText(err.Error())
+			refresh()
+			return
+		}
+		loadErr = fmt.Errorf("正在读取视频时长，请稍候…")
+		videoInfo.SetText(loadErr.Error())
+		refresh()
+		ctx, stop := context.WithCancel(context.Background())
+		loadCancel = stop
+		go func() {
+			defer stop()
+			info, err := probe(ctx, tool, path)
+			fyne.Do(func() {
+				if id != loadID {
+					return
+				}
+				loadCancel = nil
+				loadErr = err
+				if err != nil {
+					videoInfo.SetText(err.Error())
+				} else {
+					duration = info.Duration
+					videoInfo.SetText("视频时长：" + stamp(duration) + " · 切分点使用原视频时间")
+				}
+				refresh()
+			})
+		}()
+	}
 	setAll := func(keep bool) {
 		for _, obj := range segmentList.Objects {
 			obj.(*widget.Check).SetChecked(keep)
@@ -221,7 +259,7 @@ func main() {
 		if fast {
 			cutMode = "关键帧快速剪辑"
 		}
-		rangeEnd, _ := parseTime(end.Text)
+		rangeEnd := duration
 		ctx, stop := context.WithCancel(context.Background())
 		cancel = stop
 		export.Disable()
@@ -266,13 +304,16 @@ func main() {
 		if cancel != nil {
 			cancel()
 		}
+		if loadCancel != nil {
+			loadCancel()
+		}
 		w.SetCloseIntercept(nil)
 		w.Close()
 	})
-	form := widget.NewForm(widget.NewFormItem("视频文件", container.NewBorder(nil, nil, nil, browse, file)), widget.NewFormItem("保存目录", container.NewBorder(nil, nil, nil, folder, dir)), widget.NewFormItem("输出文件名", name), widget.NewFormItem("总范围开始", start), widget.NewFormItem("总范围结束", end), widget.NewFormItem("时间基准", reference))
-	help := widget.NewLabel("例：总范围 1:36 → 5:36，输入切分点 2:00、3:00，得到三段。取消勾选中间一段，即可将首尾两段合并。\n修改切分点后自动更新列表；新生成的段默认保留，请重新检查勾选。")
+	form := widget.NewForm(widget.NewFormItem("视频文件", container.NewBorder(nil, nil, nil, browse, file)), widget.NewFormItem("保存目录", container.NewBorder(nil, nil, nil, folder, dir)), widget.NewFormItem("输出文件名", name))
+	help := widget.NewLabel("输入切分点 2:00、3:00，会生成“开头 → 2:00”“2:00 → 3:00”“3:00 → 结尾”三段。取消中间一段，即可合并首尾。\n修改切分点后自动更新列表；新生成的段默认保留，请重新检查勾选。")
 	help.Wrapping = fyne.TextWrapWord
-	body := container.NewVBox(widget.NewLabelWithStyle("指定切分点，勾选要保留的段", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), help, form, widget.NewLabelWithStyle("切分时间点 · 支持毫秒，自动排序去重", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), points, widget.NewSeparator(), widget.NewLabelWithStyle("勾选保留片段（显示原视频时间）", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), selectionButtons, segmentList, widget.NewSeparator(), preview)
+	body := container.NewVBox(widget.NewLabelWithStyle("指定切分点，勾选要保留的段", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), help, form, videoInfo, widget.NewLabelWithStyle("切分时间点 · 支持毫秒，自动排序去重", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), points, widget.NewSeparator(), widget.NewLabelWithStyle("勾选保留片段（显示原视频时间）", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), selectionButtons, segmentList, widget.NewSeparator(), preview)
 	footer := container.NewVBox(fastCheck, modeHelp, container.NewGridWithColumns(2, export, cancelBtn), bar, status)
 	w.SetContent(container.NewPadded(container.NewBorder(nil, footer, nil, nil, container.NewVScroll(body))))
 	refresh()
