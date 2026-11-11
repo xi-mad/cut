@@ -45,66 +45,54 @@ func stamp(t float64) string {
 }
 func seconds(t float64) string { return strconv.FormatFloat(t, 'f', 6, 64) }
 
-func plan(start, end float64, lines string, keep, relative bool) ([]span, error) {
+// splitAt returns every interval, including the leading and trailing intervals.
+func splitAt(start, end float64, text string, relative bool) ([]span, error) {
 	if start < 0 || end <= start {
 		return nil, fmt.Errorf("结束时间必须晚于开始时间")
 	}
-	var ranges []span
-	for i, line := range strings.Split(lines, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		line = strings.NewReplacer("—", "-", "–", "-", "～", "-", "~", "-").Replace(line)
-		pair := strings.Split(line, "-")
-		if len(pair) != 2 {
-			return nil, fmt.Errorf("第 %d 行请填写：开始时间 - 结束时间", i+1)
-		}
-		a, err := parseTime(pair[0])
+	points := []float64{start, end}
+	for _, token := range strings.FieldsFunc(text, func(r rune) bool {
+		return r == ',' || r == '，' || r == ';' || r == '；' || r == '\n' || r == '\r' || r == ' ' || r == '\t'
+	}) {
+		v, err := parseTime(token)
 		if err != nil {
-			return nil, fmt.Errorf("第 %d 行：%w", i+1, err)
-		}
-		b, err := parseTime(pair[1])
-		if err != nil {
-			return nil, fmt.Errorf("第 %d 行：%w", i+1, err)
+			return nil, fmt.Errorf("切分点 %q：%w", token, err)
 		}
 		if relative {
-			a += start
-			b += start
+			v += start
 		}
-		if a < start || b > end || b <= a {
-			return nil, fmt.Errorf("第 %d 行超出总范围，或结束时间不晚于开始时间", i+1)
+		if v < start || v > end {
+			return nil, fmt.Errorf("切分点 %s 超出总范围", token)
 		}
-		ranges = append(ranges, span{a, b})
+		points = append(points, v)
 	}
-	sort.Slice(ranges, func(i, j int) bool { return ranges[i].Start < ranges[j].Start })
-	var merged []span
-	for _, r := range ranges {
-		if len(merged) > 0 && r.Start <= merged[len(merged)-1].End {
-			merged[len(merged)-1].End = math.Max(merged[len(merged)-1].End, r.End)
-		} else {
-			merged = append(merged, r)
-		}
-	}
-	if keep {
-		if len(merged) == 0 {
-			return nil, fmt.Errorf("请至少填写一个要保留的片段")
-		}
-		return merged, nil
-	}
+	sort.Float64s(points)
 	var result []span
-	cursor := start
-	for _, r := range merged {
-		if r.Start > cursor {
-			result = append(result, span{cursor, r.Start})
+	cursor := points[0]
+	for _, v := range points[1:] {
+		if v > cursor {
+			result = append(result, span{cursor, v})
+			cursor = v
 		}
-		cursor = r.End
 	}
-	if cursor < end {
-		result = append(result, span{cursor, end})
+	return result, nil
+}
+
+// Adjacent selected intervals can be rendered in one pass without an artificial splice.
+func selectedPlan(parts []span, selected map[span]bool) ([]span, error) {
+	var result []span
+	for _, r := range parts {
+		if !selected[r] {
+			continue
+		}
+		if len(result) > 0 && result[len(result)-1].End == r.Start {
+			result[len(result)-1].End = r.End
+		} else {
+			result = append(result, r)
+		}
 	}
 	if len(result) == 0 {
-		return nil, fmt.Errorf("所有内容都被删除了，请保留至少一个片段")
+		return nil, fmt.Errorf("请至少勾选一个要保留的片段")
 	}
 	return result, nil
 }

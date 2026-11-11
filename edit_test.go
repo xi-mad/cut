@@ -10,32 +10,45 @@ import (
 	"testing"
 )
 
-func TestPlan(t *testing.T) {
+func TestSplitAt(t *testing.T) {
 	tests := []struct {
-		name, text     string
-		keep, relative bool
-		want           []span
-		bad            bool
+		name, text string
+		relative   bool
+		want       []span
+		bad        bool
 	}{
-		{"用户示例", "2:00 - 3:00", false, false, []span{{96, 120}, {180, 336}}, false},
-		{"毫秒和相对时间", "0:24.500 - 0:25.500\n0:25 - 0:27", false, true, []span{{96, 120.5}, {123, 336}}, false},
-		{"保留片段排序去重", "3:00 - 4:00\n1:36 - 2:00\n1:50 - 2:00", true, false, []span{{96, 120}, {180, 240}}, false},
-		{"未删除", "", false, false, []span{{96, 336}}, false},
-		{"删除全部", "1:36 - 5:36", false, false, nil, true},
-		{"越界", "1:00 - 2:00", false, false, nil, true},
-		{"倒序", "3:00 - 2:00", false, false, nil, true},
-		{"空保留", "", true, false, nil, true},
+		{"用户示例", "2:00, 3:00", false, []span{{96, 120}, {120, 180}, {180, 336}}, false},
+		{"排序去重含边界", "3:00，2:00\n2:00;1:36;5:36", false, []span{{96, 120}, {120, 180}, {180, 336}}, false},
+		{"毫秒相对时间", "0:24.500 0:25.500", true, []span{{96, 120.5}, {120.5, 121.5}, {121.5, 336}}, false},
+		{"无切分点", "", false, []span{{96, 336}}, false},
+		{"越界", "1:00", false, nil, true},
+		{"格式错误", "2:00 - 3:00", false, nil, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := plan(96, 336, tt.text, tt.keep, tt.relative)
+			got, err := splitAt(96, 336, tt.text, tt.relative)
 			if (err != nil) != tt.bad {
-				t.Fatalf("error = %v", err)
+				t.Fatalf("error: %v", err)
 			}
 			if !tt.bad && !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("got %v want %v", got, tt.want)
 			}
 		})
+	}
+	if _, err := splitAt(96, 96, "", false); err == nil {
+		t.Fatal("accepted empty overall range")
+	}
+}
+func TestSelectedPlan(t *testing.T) {
+	parts, _ := splitAt(96, 336, "2:00,3:00,4:00", false)
+	chosen := map[span]bool{parts[0]: true, parts[2]: true, parts[3]: true}
+	got, err := selectedPlan(parts, chosen)
+	want := []span{{96, 120}, {180, 336}}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v %v", got, err)
+	}
+	if _, err := selectedPlan(parts, map[span]bool{}); err == nil {
+		t.Fatal("accepted no selected segments")
 	}
 }
 func TestParseTime(t *testing.T) {
