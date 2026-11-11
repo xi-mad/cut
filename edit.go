@@ -167,10 +167,11 @@ func probe(ctx context.Context, tool, input string) (mediaInfo, error) {
 	return mediaInfo{duration, audio}, nil
 }
 
-// Encode each retained interval with identical settings, then concatenate in source order.
+// Process each retained interval with identical settings, then concatenate in source order.
+// Fast mode copies video from the preceding keyframe; audio is encoded for MP4 compatibility.
 // Accurate input seeking decodes from the preceding keyframe and discards frames
 // before the requested time, without decoding the whole source for every interval.
-func render(ctx context.Context, ffmpeg, input, output string, ranges []span, audio bool, progress func(int, int)) error {
+func render(ctx context.Context, ffmpeg, input, output string, ranges []span, audio, fast bool, progress func(int, int)) error {
 	temp, err := os.MkdirTemp(filepath.Dir(output), ".video-cut-")
 	if err != nil {
 		return err
@@ -193,13 +194,22 @@ func render(ctx context.Context, ffmpeg, input, output string, ranges []span, au
 	for i, r := range ranges {
 		progress(i+1, len(ranges))
 		name := fmt.Sprintf("part-%04d.mp4", i)
-		args := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-ss", seconds(r.Start), "-accurate_seek", "-i", input, "-t", seconds(r.End - r.Start), "-map", "0:v:0"}
+		seek := "-accurate_seek"
+		if fast {
+			seek = "-noaccurate_seek"
+		}
+		args := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-ss", seconds(r.Start), seek, "-i", input, "-t", seconds(r.End - r.Start), "-map", "0:v:0"}
 		if audio {
 			args = append(args, "-map", "0:a:0", "-af", "apad", "-c:a", "aac")
 		} else {
 			args = append(args, "-an")
 		}
-		args = append(args, "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", "-t", seconds(r.End-r.Start), filepath.Join(temp, name))
+		if fast {
+			args = append(args, "-c:v", "copy", "-avoid_negative_ts", "make_zero")
+		} else {
+			args = append(args, "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2")
+		}
+		args = append(args, "-t", seconds(r.End-r.Start), filepath.Join(temp, name))
 		if err := run(args...); err != nil {
 			return err
 		}

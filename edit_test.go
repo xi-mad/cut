@@ -83,7 +83,7 @@ func TestRenderIntegration(t *testing.T) {
 				t.Fatalf("audio detection: %v", info)
 			}
 			// Both cuts fall between keyframes; retained duration is 1.52 seconds.
-			if err := render(ctx, ffmpeg, input, output, []span{{0.52, 1.04}, {2, 3}}, audio, func(int, int) {}); err != nil {
+			if err := render(ctx, ffmpeg, input, output, []span{{0.52, 1.04}, {2, 3}}, audio, false, func(int, int) {}); err != nil {
 				t.Fatal(err)
 			}
 			result, err := probe(ctx, ffprobe, output)
@@ -93,8 +93,20 @@ func TestRenderIntegration(t *testing.T) {
 			if math.Abs(result.Duration-1.52) > 0.12 || result.Audio != audio {
 				t.Fatalf("unexpected result: %+v", result)
 			}
+			fastOutput := filepath.Join(dir, "fast.mp4")
+			if err := render(ctx, ffmpeg, input, fastOutput, []span{{0.52, 1.04}, {2, 3}}, audio, true, func(int, int) {}); err != nil {
+				t.Fatal(err)
+			}
+			fastInfo, err := probe(ctx, ffprobe, fastOutput)
+			if err != nil || fastInfo.Duration <= 0 || fastInfo.Audio != audio {
+				t.Fatalf("fast output: %+v %v", fastInfo, err)
+			}
+			if b, err := exec.Command(ffmpeg, "-v", "error", "-i", fastOutput, "-f", "null", "-").CombinedOutput(); err != nil || len(b) != 0 {
+				t.Fatalf("fast output decode: %v %s", err, b)
+			}
+
 			before, _ := os.ReadFile(output)
-			if err := render(ctx, ffmpeg, input, output, []span{{0, 1}}, audio, func(int, int) {}); err == nil {
+			if err := render(ctx, ffmpeg, input, output, []span{{0, 1}}, audio, false, func(int, int) {}); err == nil {
 				t.Fatal("overwrote output")
 			}
 			after, _ := os.ReadFile(output)
@@ -104,7 +116,7 @@ func TestRenderIntegration(t *testing.T) {
 			cancelled, cancel := context.WithCancel(ctx)
 			cancel()
 			cancelOutput := filepath.Join(dir, "cancel.mp4")
-			if err := render(cancelled, ffmpeg, input, cancelOutput, []span{{0, 1}}, audio, func(int, int) {}); err == nil {
+			if err := render(cancelled, ffmpeg, input, cancelOutput, []span{{0, 1}}, audio, false, func(int, int) {}); err == nil {
 				t.Fatal("expected cancellation")
 			}
 			if _, err := os.Stat(cancelOutput); !os.IsNotExist(err) {

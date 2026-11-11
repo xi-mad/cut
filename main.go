@@ -98,6 +98,15 @@ func main() {
 	status.Wrapping = fyne.TextWrapWord
 	bar := widget.NewProgressBarInfinite()
 	bar.Hide()
+	modeHelp := widget.NewLabel("默认精确剪辑：重新编码，适合删除一两秒的片段；原视频不会被覆盖。")
+	modeHelp.Wrapping = fyne.TextWrapWord
+	fastCheck := widget.NewCheck("关键帧快速剪辑（切点可能有偏差）", func(fast bool) {
+		if fast {
+			modeHelp.SetText("快速模式：视频不重新编码，音频转 AAC。切点可能提前到上一关键帧，可能保留部分要删除的内容，实际时长可能与预览不同。")
+		} else {
+			modeHelp.SetText("默认精确剪辑：重新编码，适合删除一两秒的片段；原视频不会被覆盖。")
+		}
+	})
 	var cancel context.CancelFunc
 	cancelBtn := widget.NewButton("取消导出", func() {
 		if cancel != nil {
@@ -160,6 +169,11 @@ func main() {
 			dialog.ShowError(fmt.Errorf("输出文件已存在或无法访问，请换一个文件名"), w)
 			return
 		}
+		fast := fastCheck.Checked
+		cutMode := "精确剪辑"
+		if fast {
+			cutMode = "关键帧快速剪辑"
+		}
 		rangeEnd, _ := parseTime(end.Text)
 		ctx, stop := context.WithCancel(context.Background())
 		cancel = stop
@@ -176,8 +190,8 @@ func main() {
 				}
 			}
 			if err == nil {
-				err = render(ctx, ffmpeg, input, output, p, info.Audio, func(i, n int) {
-					fyne.Do(func() { status.SetText(fmt.Sprintf("正在精确剪辑第 %d / %d 段，请稍候…", i, n)) })
+				err = render(ctx, ffmpeg, input, output, p, info.Audio, fast, func(i, n int) {
+					fyne.Do(func() { status.SetText(fmt.Sprintf("正在%s第 %d / %d 段，请稍候…", cutMode, i, n)) })
 				})
 			}
 			cancelled := ctx.Err() != nil
@@ -212,7 +226,7 @@ func main() {
 	help := widget.NewLabel("例：总范围 1:36 → 5:36，删除 2:00 - 3:00，自动得到 1:36 → 2:00 和 3:00 → 5:36。\n如果打开的是已截取的小视频，直接使用小视频播放器上的时间。重叠片段会自动合并。")
 	help.Wrapping = fyne.TextWrapWord
 	body := container.NewVBox(widget.NewLabelWithStyle("删掉不要的，剩下连起来", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), help, form, widget.NewLabelWithStyle("片段清单 · 每行填写一个时间段", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), ranges, widget.NewSeparator(), widget.NewLabelWithStyle("合并预览（显示原视频时间）", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), preview)
-	footer := container.NewVBox(widget.NewLabel("精确剪辑会重新编码，切点精度受视频帧率限制；原视频不会被覆盖。"), container.NewGridWithColumns(2, export, cancelBtn), bar, status)
+	footer := container.NewVBox(fastCheck, modeHelp, container.NewGridWithColumns(2, export, cancelBtn), bar, status)
 	w.SetContent(container.NewPadded(container.NewBorder(nil, footer, nil, nil, container.NewVScroll(body))))
 	refresh()
 	w.ShowAndRun()
